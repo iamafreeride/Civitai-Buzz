@@ -19,6 +19,7 @@ RUN apt-get update \
         chromium \
         chromium-driver \
         xvfb \
+        xauth \
         fonts-liberation \
         ca-certificates \
         tzdata \
