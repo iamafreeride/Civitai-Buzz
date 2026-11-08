@@ -60,6 +60,8 @@ USER_AGENT = os.getenv("USER_AGENT", DEFAULT_UA)
 BROWSER = os.getenv("BROWSER", "chrome").strip().lower()
 HEADLESS = os.getenv("HEADLESS", "true").strip().lower() not in {"0", "false", "no"}
 DEBUG = os.getenv("DEBUG", "false").strip().lower() in {"1", "true", "yes"}
+#: Fail (exit 1) when the claim entry is missing instead of treating it as done.
+STRICT = os.getenv("STRICT", "false").strip().lower() in {"1", "true", "yes"}
 
 LOGIN_TIMEOUT = float(os.getenv("LOGIN_TIMEOUT", "90"))
 ACTION_TIMEOUT = float(os.getenv("ACTION_TIMEOUT", "30"))
@@ -506,6 +508,20 @@ def close_popover(driver) -> None:
     time.sleep(0.5)
 
 
+def is_logged_in(driver) -> bool:
+    """Logged out pages show a 'Sign in' button and no account menu."""
+    try:
+        for element in driver.find_elements(By.XPATH, "//button[normalize-space(.)='Sign in']"):
+            if visible(element):
+                return False
+    except WebDriverException:
+        pass
+    return (
+        first_visible(driver, "[aria-label='Account menu']", timeout=0) is not None
+        or first_visible(driver, "[aria-label*='account' i]", timeout=0) is not None
+    )
+
+
 def claim(driver) -> str:
     """Return 'claimed', 'already' or 'failed'.
 
@@ -547,7 +563,9 @@ def claim(driver) -> str:
     if item is None:
         log("'Claim 25 Buzz' not found on the page")
         dump_ui(driver)
-        return "failed"
+        # Everything rendered and we are logged in: the daily claim is simply
+        # not on offer (already claimed today, or not eligible).
+        return "none" if is_logged_in(driver) else "failed"
 
     log("Clicking 'Claim 25 Buzz'")
     if not click(driver, item):
@@ -647,6 +665,13 @@ def main(argv: list[str] | None = None) -> int:
         if result == "already":
             log("Nothing to do: already claimed today")
             return EXIT_OK
+        if result == "none":
+            log(
+                "No claim entry offered (already claimed today, or this account "
+                "is not eligible). Set STRICT=true to treat this as a failure."
+            )
+            if not STRICT:
+                return EXIT_OK
 
         save_artifacts(driver, "claim-failed")
         return EXIT_FAIL

@@ -27,8 +27,9 @@
 1. 啟動 Chromium（可無頭），先灌入 cookie（含 `cf_clearance`）。
 2. 開啟 <https://civitai.red/generate>；若仍是 Cloudflare 驗證頁，直接失敗並提示更新 cookie。
 3. 關掉首次進入生成頁可能出現的導覽視窗（Skip / Close）。
-4. 在頁面上找文字符合 `Claim 25 Buzz` 的按鈕並點擊。
-5. 等出現 claimed／success 字樣或按鈕消失；若頁面本來就沒有可領項目，再退一步去開 Create 選單找。
+4. 在頁面上找文字符合 `Claim 25 Buzz` 的按鈕並點擊；找不到就依序改看 buzz 彈窗、帳號選單、Create 選單。
+5. 等出現 claimed／success 字樣或按鈕消失。
+6. 若四個位置都沒有領取項目（今天已領／不符資格），印出畫面所有按鈕並以 exit 0 結束。
 
 > 若你的版面是把 `Claim 25 Buzz` 放在 Create 下拉選單裡，程式也會自動退回那條路徑
 > （Create 是分裂按鈕：左邊跳 /create，右邊箭頭才開選單）。
@@ -95,10 +96,11 @@ python -m venv .venv
 |---|---|---|
 | `CIVITAI_COOKIE` | 必填 | 整段 Cookie header（含 `cf_clearance`） |
 | `USER_AGENT` | Chrome 157 (Win64) | 必須與產生 cookie 的瀏覽器一致 |
+| `CLAIM_TIMEOUT` | `150` | 等領取鈕出現的秒數（這站是延遲渲染） |
+| `STRICT` | `false` | `true` = 找不到領取項目就 exit 1（預設視為今日已領） |
 | `CIVITAI_URL` | `https://civitai.red/generate` | 站台網址（給純網域會自動接 `/generate`） |
 | `HEADLESS` | `true` | `false` 會開視窗（Cloudflare 較容易過） |
 | `DEBUG` | `false` | 失敗時把截圖與 DOM 存到 `artifacts/` |
-| `LOGIN_TIMEOUT` / `CLAIM_TIMEOUT` | 45 / 30 | 等頁面／等選單的秒數 |
 | `BROWSER` | `chrome` | `chrome`（容器）或 `edge`（Windows） |
 
 ---
@@ -135,9 +137,11 @@ Windows 工作排程器：程式填 `run.bat`（要背景跑就把最後的 `pau
 **找不到 Create 按鈕**
 代表頁面根本沒載入成功（還是驗證頁），或被導到登入頁。開 `DEBUG=true` 看 `artifacts/*.png`。
 
-**選單裡沒有 Claim 25 Buzz**
-程式會印出當下選單內容。若只有 Generate / Post Images / Upload a Model 之類，
-代表 cookie 沒生效（未登入）——重新抓 cookie；若出現 `already claimed` 代表今天已領。
+**找不到 Claim 25 Buzz**
+程式會依序找：頁面 → buzz 彈窗 → 帳號選單 → Create 選單，並把每一步的內容印出來。
+實測（2026-11）已領過的帳號在 `/generate` 的整頁 HTML 裡完全沒有 `Claim 25` 字串，
+所以「四個位置都沒有」通常就是**今天已領**，此時 exit 0。
+若你要它因此報錯（例如排程監控），加 `-e STRICT=true`。
 
 ---
 
