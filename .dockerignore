@@ -1,0 +1,17 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+artifacts/
+*.zip
+*.png
+*.html
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

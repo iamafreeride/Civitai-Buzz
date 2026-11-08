@@ -1,0 +1,15 @@
+services:
+  buzz:
+    build: .
+    image: civitai-buzz:latest
+    container_name: civitai-buzz
+
+    # CIVITAI_COOKIE=... lives in .env
+    env_file:
+      - .env
+
+    restart: "no"
+    shm_size: "1g"
+
+    volumes:
+      - ./artifacts:/app/artifacts
