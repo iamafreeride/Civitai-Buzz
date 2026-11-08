@@ -25,13 +25,14 @@
 ## 流程
 
 1. 啟動 Chromium（可無頭），先灌入 cookie（含 `cf_clearance`）。
-2. 開啟 <https://civitai.red/>；若仍是 Cloudflare 驗證頁，直接失敗並提示更新 cookie。
-3. 點 `Create` **右側的箭頭**（Create 是分裂按鈕：左邊會跳到 /create，右邊才是選單）。
-4. 等選單出現，找文字符合 `Claim 25 Buzz` 的按鈕並點擊。
-5. 等出現 claimed／success 字樣或該項目消失；若選單本來就沒有可領項目，視為今日已領。
+2. 開啟 <https://civitai.red/generate>；若仍是 Cloudflare 驗證頁，直接失敗並提示更新 cookie。
+3. 關掉首次進入生成頁可能出現的導覽視窗（Skip / Close）。
+4. 在頁面上找文字符合 `Claim 25 Buzz` 的按鈕並點擊。
+5. 等出現 claimed／success 字樣或按鈕消失；若頁面本來就沒有可領項目，再退一步去開 Create 選單找。
 
-> 未登入時選單只會有 Generate / Post Images / Upload a Model … 這些項目，
-> 登入後才會多出 `Claim 25 Buzz`。找不到時程式會把選單內容印出來，方便判斷是「沒登入」還是「已領過」。
+> 若你的版面是把 `Claim 25 Buzz` 放在 Create 下拉選單裡，程式也會自動退回那條路徑
+> （Create 是分裂按鈕：左邊跳 /create，右邊箭頭才開選單）。
+> 找不到時會把選單內容印出來，方便判斷是「沒登入」還是「已領過」。
 
 ---
 
@@ -94,7 +95,7 @@ python -m venv .venv
 |---|---|---|
 | `CIVITAI_COOKIE` | 必填 | 整段 Cookie header（含 `cf_clearance`） |
 | `USER_AGENT` | Chrome 157 (Win64) | 必須與產生 cookie 的瀏覽器一致 |
-| `CIVITAI_URL` | `https://civitai.red/` | 站台網址 |
+| `CIVITAI_URL` | `https://civitai.red/generate` | 站台網址（給純網域會自動接 `/generate`） |
 | `HEADLESS` | `true` | `false` 會開視窗（Cloudflare 較容易過） |
 | `DEBUG` | `false` | 失敗時把截圖與 DOM 存到 `artifacts/` |
 | `LOGIN_TIMEOUT` / `CLAIM_TIMEOUT` | 45 / 30 | 等頁面／等選單的秒數 |

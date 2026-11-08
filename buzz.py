@@ -45,7 +45,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 # Configuration
 # --------------------------------------------------------------------------- #
 
-SITE_URL = os.getenv("CIVITAI_URL", "https://civitai.red/").rstrip("/") + "/"
+SITE_URL = os.getenv("CIVITAI_URL", "https://civitai.red/generate").rstrip("/")
+if SITE_URL.count("/") == 2:  # bare origin -> default page
+    SITE_URL = SITE_URL + "/generate"
 COOKIE_RAW = os.getenv("CIVITAI_COOKIE", "")
 
 DEFAULT_UA = (
@@ -300,12 +302,12 @@ def menu_items(driver) -> list[str]:
     return labels
 
 
-def find_claim_item(driver):
-    """The 'Claim 25 Buzz' entry is a button/menuitem inside the popover."""
+def find_claim_button(driver):
+    """Any visible 'Claim 25 Buzz' control on the page (button, link, menuitem)."""
     try:
         elements = driver.find_elements(
             By.CSS_SELECTOR,
-            "button, [role='menuitem'], [role='button'], a",
+            "button, [role='button'], [role='menuitem'], a",
         )
     except WebDriverException:
         return None
@@ -317,6 +319,52 @@ def find_claim_item(driver):
         if text and CLAIM_RE.search(text):
             return element
     return None
+
+
+def dismiss_onboarding(driver) -> None:
+    """The /generate page can open a first-visit tour that swallows clicks.
+
+    Mantine does not always put role="dialog" on the modal, so this also looks
+    for the tour's buttons page-wide.
+    """
+    dismiss_labels = {"skip", "close", "dismiss", "got it", "no thanks", "maybe later"}
+
+    for _ in range(2):
+        try:
+            candidates = driver.find_elements(By.CSS_SELECTOR, "button, [role='button']")
+        except WebDriverException:
+            return
+
+        clicked = False
+        # Prefer a button inside a modal, then fall back to anywhere on the page.
+        modals = []
+        try:
+            modals = [
+                m for m in driver.find_elements(
+                    By.CSS_SELECTOR, "[role='dialog'], .mantine-Modal-content, .mantine-Modal-root"
+                ) if visible(m)
+            ]
+        except WebDriverException:
+            pass
+
+        for scope in modals + [None]:
+            pool = candidates if scope is None else scope.find_elements(By.CSS_SELECTOR, "button, [role='button']")
+            for element in pool:
+                if not visible(element):
+                    continue
+                label = norm(element.text).lower()
+                aria = norm(element.get_attribute("aria-label")).lower()
+                if label in dismiss_labels or (aria == "close" and scope is not None):
+                    if click(driver, element):
+                        log(f"Dismissed dialog ({label or aria})")
+                        clicked = True
+                        break
+            if clicked:
+                break
+
+        if not clicked:
+            return
+        time.sleep(1.0)
 
 
 def already_claimed(driver) -> bool:
@@ -333,27 +381,50 @@ def already_claimed(driver) -> bool:
     )
 
 
+def wait_for_claim_button(driver, timeout: float):
+    """Return (element, status) where status is None or 'already'."""
+    deadline = time.time() + timeout
+    last_dismiss = 0.0
+    while time.time() < deadline:
+        # The first-visit tour can pop up a second or two after load and sit on
+        # top of the button, so keep swatting it while we wait.
+        if time.time() - last_dismiss > 3:
+            dismiss_onboarding(driver)
+            last_dismiss = time.time()
+
+        item = find_claim_button(driver)
+        if item is not None:
+            return item, None
+        if already_claimed(driver):
+            return None, "already"
+        time.sleep(0.5)
+    return None, None
+
+
 def claim(driver) -> str:
     """Return 'claimed', 'already' or 'failed'."""
-    if not open_create_menu(driver):
-        return "failed"
+    dismiss_onboarding(driver)
+    time.sleep(1.0)
 
-    deadline = time.time() + CLAIM_TIMEOUT
-    item = None
-    while time.time() < deadline:
-        item = find_claim_item(driver)
-        if item is not None:
-            break
-        if already_claimed(driver):
-            log("Buzz already claimed today")
-            return "already"
-        time.sleep(0.5)
+    item, status = wait_for_claim_button(driver, CLAIM_TIMEOUT)
+    if status == "already":
+        log("Buzz already claimed today")
+        return "already"
+
+    if item is None:
+        # Older layout: the entry lives inside the Create menu instead.
+        log("'Claim 25 Buzz' not on the page, trying the Create menu")
+        if open_create_menu(driver):
+            item, status = wait_for_claim_button(driver, CLAIM_TIMEOUT / 2)
+            if status == "already":
+                log("Buzz already claimed today")
+                return "already"
 
     if item is None:
         labels = menu_items(driver)
         if labels:
-            log(f"Menu contains: {' | '.join(labels)}")
-        log("'Claim 25 Buzz' not found in the Create menu")
+            log(f"Create menu contains: {' | '.join(labels)}")
+        log("'Claim 25 Buzz' not found on the page")
         return "failed"
 
     log("Clicking 'Claim 25 Buzz'")
@@ -369,9 +440,9 @@ def claim(driver) -> str:
             return "claimed"
         if already_claimed(driver):
             return "already"
-        # The entry disappearing from the menu is also a good sign.
-        if find_claim_item(driver) is None and time.time() > deadline - ACTION_TIMEOUT + 6:
-            log("Claim entry disappeared from the menu")
+        # The control disappearing is also a good sign.
+        if find_claim_button(driver) is None and time.time() > deadline - ACTION_TIMEOUT + 6:
+            log("Claim entry disappeared from the page")
             return "claimed"
         time.sleep(0.5)
 
