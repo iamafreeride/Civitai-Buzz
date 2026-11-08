@@ -39,6 +39,7 @@ from selenium.common.exceptions import (
     WebDriverException,
 )
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 # --------------------------------------------------------------------------- #
@@ -60,7 +61,7 @@ BROWSER = os.getenv("BROWSER", "chrome").strip().lower()
 HEADLESS = os.getenv("HEADLESS", "true").strip().lower() not in {"0", "false", "no"}
 DEBUG = os.getenv("DEBUG", "false").strip().lower() in {"1", "true", "yes"}
 
-LOGIN_TIMEOUT = float(os.getenv("LOGIN_TIMEOUT", "45"))
+LOGIN_TIMEOUT = float(os.getenv("LOGIN_TIMEOUT", "90"))
 ACTION_TIMEOUT = float(os.getenv("ACTION_TIMEOUT", "30"))
 ARTIFACTS_DIR = Path(os.getenv("ARTIFACTS_DIR", "/app/artifacts"))
 
@@ -70,8 +71,8 @@ SEL_CREATE = "[data-activity='create:navbar']"
 #: itself navigates to /create.
 SEL_CREATE_CARET = "button[data-activity='create:navbar'] + button"
 #: The daily buzz entry inside the Create popover.
-CLAIM_RE = re.compile(r"claim\s*25\s*buzz", re.I)
-CLAIM_TIMEOUT = float(os.getenv("CLAIM_TIMEOUT", "30"))
+CLAIM_RE = re.compile(r"claim\s*[\d,]*\s*buzz", re.I)
+CLAIM_TIMEOUT = float(os.getenv("CLAIM_TIMEOUT", "150"))
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -408,7 +409,7 @@ def dismiss_onboarding(driver) -> None:
     Mantine does not always put role="dialog" on the modal, so this also looks
     for the tour's buttons page-wide.
     """
-    dismiss_labels = {"skip", "close", "dismiss", "got it", "no thanks", "maybe later"}
+    dismiss_labels = {"skip", "close", "close ad", "dismiss", "got it", "no thanks", "maybe later"}
 
     for _ in range(2):
         try:
@@ -482,44 +483,68 @@ def wait_for_claim_button(driver, timeout: float):
     return None, None
 
 
+def wait_app_ready(driver, timeout: float) -> bool:
+    """The shop renders the toolbar late; wait for it before hunting buttons."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if (
+            first_visible(driver, SEL_CREATE, timeout=0) is not None
+            or first_visible(driver, "[aria-label*='account' i]", timeout=0) is not None
+            or find_claim_button(driver) is not None
+        ):
+            return True
+        dismiss_onboarding(driver)
+        time.sleep(1.0)
+    return False
+
+
+def close_popover(driver) -> None:
+    try:
+        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+    except WebDriverException:
+        pass
+    time.sleep(0.5)
+
+
 def claim(driver) -> str:
     """Return 'claimed', 'already' or 'failed'.
 
-    The claim control has moved around between Civitai releases, so this tries
-    the places it has been seen, cheapest first:
-      1. straight on the /generate page
-      2. the buzz balance popover in the navbar
-      3. the avatar / account menu
-      4. the Create menu (older layout)
+    The claim control appears late and has moved around between releases, so
+    this waits for the toolbar, then tries: page -> buzz popover -> account
+    menu -> Create menu, logging what each popover contained.
     """
     dismiss_onboarding(driver)
-    time.sleep(1.0)
+    if not wait_app_ready(driver, LOGIN_TIMEOUT):
+        log("The toolbar never rendered")
+        dump_ui(driver)
+        return "failed"
 
-    attempts = [
-        ("page", None),
-        ("buzz widget", buzz_widget),
-        ("account menu", open_account_menu),
-        ("Create menu", open_create_menu),
-    ]
+    item, status = wait_for_claim_button(driver, CLAIM_TIMEOUT)
+    if status == "already":
+        log("Buzz already claimed today")
+        return "already"
 
-    item = None
-    for name, opener in attempts:
-        if opener is not None:
+    if item is None:
+        for name, opener in (
+            ("buzz popover", buzz_widget),
+            ("account menu", open_account_menu),
+            ("Create menu", open_create_menu),
+        ):
             if not opener(driver):
                 continue
             log(f"Looking for the claim entry in the {name}")
-
-        item, status = wait_for_claim_button(driver, CLAIM_TIMEOUT if opener is None else CLAIM_TIMEOUT / 2)
-        if status == "already":
-            log("Buzz already claimed today")
-            return "already"
-        if item is not None:
-            break
+            item, status = wait_for_claim_button(driver, CLAIM_TIMEOUT / 3)
+            if status == "already":
+                log("Buzz already claimed today")
+                return "already"
+            if item is not None:
+                break
+            labels = menu_items(driver)
+            if labels:
+                log(f"{name} contains: {' | '.join(labels[:15])}")
+            close_popover(driver)
 
     if item is None:
-        labels = menu_items(driver)
-        if labels:
-            log(f"Menu contains: {' | '.join(labels)}")
         log("'Claim 25 Buzz' not found on the page")
         dump_ui(driver)
         return "failed"
