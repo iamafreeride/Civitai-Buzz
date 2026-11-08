@@ -8,8 +8,13 @@
 set -e
 
 if [ "${HEADLESS:-true}" = "false" ] || [ "${HEADLESS:-true}" = "0" ]; then
-    if [ -z "${DISPLAY:-}" ]; then
+    if [ -n "${DISPLAY:-}" ]; then
+        :                                   # a real X display is already there
+    elif command -v xvfb-run >/dev/null 2>&1 && command -v xauth >/dev/null 2>&1; then
         exec xvfb-run -a --server-args="-screen 0 1440x900x24" python3 buzz.py "$@"
+    else
+        echo "[entrypoint] xvfb-run/xauth not available, falling back to headless" >&2
+        export HEADLESS=true
     fi
 fi
 
