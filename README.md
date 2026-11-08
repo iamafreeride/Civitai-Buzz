@@ -99,7 +99,7 @@ python -m venv .venv
 | `CLAIM_TIMEOUT` | `150` | 等領取鈕出現的秒數（這站是延遲渲染） |
 | `STRICT` | `false` | `true` = 找不到領取項目就 exit 1（預設視為今日已領） |
 | `CIVITAI_URL` | `https://civitai.red/generate` | 站台網址（給純網域會自動接 `/generate`） |
-| `HEADLESS` | `true` | `false` 會開視窗（Cloudflare 較容易過） |
+| `HEADLESS` | `true` | `false` = 用 Xvfb 開**有頭**瀏覽器（最像真瀏覽器，見下方說明） |
 | `DEBUG` | `false` | 失敗時把截圖與 DOM 存到 `artifacts/` |
 | `BROWSER` | `chrome` | `chrome`（容器）或 `edge`（Windows） |
 
@@ -126,6 +126,30 @@ Windows 工作排程器：程式填 `run.bat`（要背景跑就把最後的 `pau
 > `cf_clearance` 會過期（通常數小時到數天）。排程失敗時，重新抓一次 cookie 即可。
 
 ---
+
+## 為什麼有時候看不到「Claim 25 Buzz」
+
+實測（2026-11，同一個帳號、未領取狀態）：
+
+| 環境 | 結果 |
+|---|---|
+| 你平常的瀏覽器 | 左側面板底部出現一整條 `Claim 25 Buzz` |
+| 容器內 headless Chrome（1440×900 / 480×900） | 整頁 DOM 完全沒有 `Claim 25` 字串（等了 3 分鐘） |
+
+也就是說這個按鈕會被「你的瀏覽器長得像不像真的」影響。因此映像內建了 **Xvfb**：
+
+```bash
+docker run --rm \
+  -e CIVITAI_COOKIE='...' \
+  -e HEADLESS=false \
+  -v "${PWD}/artifacts:/app/artifacts" \
+  iamafreeride/civitai-buzz:latest
+```
+
+`HEADLESS=false` 時會用虛擬螢幕跑**有頭** Chrome（1440×900），並啟用軟體 WebGL
+（`--use-angle=swiftshader`），讓頁面內的模型載入器能跑完——這是最接近你真實瀏覽器的模式。
+
+若還是不出現，把 `artifacts/*.png` 給我，我對著實際畫面再調整。
 
 ## 疑難排解
 

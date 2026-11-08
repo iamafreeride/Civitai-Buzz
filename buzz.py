@@ -225,6 +225,10 @@ def build_driver():
         "--lang=en-US",
         f"--user-agent={USER_AGENT}",
         "--disable-blink-features=AutomationControlled",
+        "--use-gl=angle",
+        "--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader",
+        "--ignore-gpu-blocklist",
     ]
     if HEADLESS:
         common.insert(0, "--headless=new")
@@ -312,23 +316,53 @@ def menu_items(driver) -> list[str]:
     return labels
 
 
+FIND_CLAIM_JS = """
+const re = /claim\\s*[\\d,]*\\s*buzz/i;
+const nodes = document.querySelectorAll('button, [role="button"], a, [role="menuitem"]');
+for (const n of nodes) {
+    const text = (n.innerText || n.textContent || '').replace(/\\s+/g, ' ').trim();
+    const aria = (n.getAttribute('aria-label') || '');
+    if (re.test(text) || re.test(aria)) {
+        n.setAttribute('data-ndf-claim', '1');
+        return text || aria;
+    }
+}
+return '';
+"""
+
+#: The claim bar sits at the bottom of the left sidebar and renders late; walk
+#: every scrollable container so lazily mounted sections exist before we look.
+REVEAL_JS = """
+const scrolled = [];
+document.querySelectorAll('*').forEach(function (el) {
+    if (el.scrollHeight > el.clientHeight + 40 && el.clientHeight > 100) {
+        el.scrollTop = el.scrollHeight;
+        scrolled.push(el.tagName);
+    }
+});
+return scrolled.length;
+"""
+
+
 def find_claim_button(driver):
-    """Any visible 'Claim 25 Buzz' control (button, link, menuitem, aria-label)."""
+    """Look for 'Claim N Buzz' through the DOM, not just what is in the viewport."""
     try:
-        elements = driver.find_elements(
-            By.CSS_SELECTOR,
-            "button, [role='button'], [role='menuitem'], a, [aria-label]",
-        )
-    except WebDriverException:
+        text = driver.execute_script(FIND_CLAIM_JS)
+    except (JavascriptException, WebDriverException):
+        return None
+    if not text:
+        return None
+    try:
+        return driver.find_element(By.CSS_SELECTOR, "[data-ndf-claim='1']")
+    except (NoSuchElementException, WebDriverException):
         return None
 
-    for element in elements:
-        if not visible(element):
-            continue
-        for candidate in (norm(element.text), norm(element.get_attribute("aria-label"))):
-            if candidate and CLAIM_RE.search(candidate):
-                return element
-    return None
+
+def reveal_lazy_sections(driver) -> None:
+    try:
+        driver.execute_script(REVEAL_JS)
+    except (JavascriptException, WebDriverException):
+        pass
 
 
 def buzz_widget(driver) -> bool:
@@ -474,6 +508,7 @@ def wait_for_claim_button(driver, timeout: float):
         # top of the button, so keep swatting it while we wait.
         if time.time() - last_dismiss > 3:
             dismiss_onboarding(driver)
+            reveal_lazy_sections(driver)
             last_dismiss = time.time()
 
         item = find_claim_button(driver)

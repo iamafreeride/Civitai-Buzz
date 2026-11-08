@@ -13,10 +13,12 @@ ENV PYTHONUNBUFFERED=1 \
     BROWSER=chrome \
     WEBDRIVER_PATH=/usr/bin/chromedriver
 
+# xvfb lets us run a headed browser when HEADLESS=false.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         chromium \
         chromium-driver \
+        xvfb \
         fonts-liberation \
         ca-certificates \
         tzdata \
@@ -30,7 +32,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY buzz.py ./
+COPY buzz.py entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
 RUN useradd --create-home --uid 10001 runner \
     && mkdir -p "${ARTIFACTS_DIR}" \
@@ -38,4 +41,4 @@ RUN useradd --create-home --uid 10001 runner \
 
 USER runner
 
-ENTRYPOINT ["python3", "buzz.py"]
+ENTRYPOINT ["/app/entrypoint.sh"]
