@@ -3,22 +3,34 @@
 Civitai-Buzz
 ============
 
-每天領取 Civitai 的 25 Buzz。
+每天在 https://civitai.red/generate 領取 25 Buzz；領到就結束，容器也跟著結束。
 
-做法參考 Greasy Fork 上的「Civitai Auto-Clicker for Buzz and Follow」：
-那個腳本其實只做一件事——持續輪詢頁面，等文字為 `Claim 25 Buzz` 的按鈕出現、
-可見且未被停用時按下去。它附帶的「Follow 三個頁面」與本專案無關，已移除。
+為什麼不是「找按鈕來點」？
+--------------------------
+對 civitai.red/generate 做過一輪觀察（瀏覽器實際跑 + 前端 bundle 靜態檢視）後，
+確認那顆 `Claim 25 Buzz` 按鈕只是表層，真正的動作出現在 tRPC：
 
-本專案因此只負責：
-  1. 用你的 Cookie 登入（這個站台在 Cloudflare 後面，沒有帳密表單）
-  2. 開啟 https://civitai.red/generate
-  3. 等 `Claim 25 Buzz` 出現並點擊
-  4. 確認結果後結束
+    GET  /api/trpc/user.userRewardDetails        -> 找到 type == "dailyBoost"
+    POST /api/trpc/buzz.claimDailyBoostReward    -> 領取（回傳 null）
+
+前端邏輯（chunk 內）：只有 `dailyBoost.awardedCount === 0`、且 buzz account 有
+charge 時才把按鈕畫出來，文字是 `Claim ${awardAmount} Buzz`。也就是說：
+
+  * 按鈕不存在 != 沒有獎勵，可能只是還沒渲染、被 tour 蓋住、或 headless 沒畫。
+  * 直接打 tRPC 不受 DOM/React/overlay 影響，速度快很多，也更好驗證。
+
+所以本程式先走 API，失敗才退回「找按鈕來點」的舊做法。
+
+安全
+----
+`CIVITAI_COOKIE` 與 `USER_AGENT` 只從環境變數讀取，不寫入檔案、不進 image、
+不留 log。請用 `docker run -e ...` 或 shell 環境變數傳入。
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -47,33 +59,37 @@ SITE_URL = os.getenv("CIVITAI_URL", "https://civitai.red/generate").rstrip("/")
 if SITE_URL.count("/") == 2:  # bare origin -> the generate page
     SITE_URL = SITE_URL + "/generate"
 
+#: Empty means "let the browser send its own UA". There is deliberately no
+#: baked-in UA here: USER_AGENT must be supplied at runtime, never stored.
 COOKIE_RAW = os.getenv("CIVITAI_COOKIE", "")
-USER_AGENT = os.getenv(
-    "USER_AGENT",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36",
-)
+USER_AGENT = os.getenv("USER_AGENT", "").strip()
 
 BROWSER = os.getenv("BROWSER", "chrome").strip().lower()
 HEADLESS = os.getenv("HEADLESS", "true").strip().lower() not in {"0", "false", "no"}
 DEBUG = os.getenv("DEBUG", "false").strip().lower() in {"1", "true", "yes"}
-#: When the button never shows up, exit 1 instead of "nothing to claim".
+#: When nothing can be claimed, exit 1 instead of "nothing to do".
 STRICT = os.getenv("STRICT", "false").strip().lower() in {"1", "true", "yes"}
 
-#: The userscript waits forever; give it a generous but finite window.
+#: Cloudflare's non-interactive challenge needs a few seconds in a real browser.
+CF_TIMEOUT = float(os.getenv("CF_TIMEOUT", "90"))
+#: How long to keep polling for the reward to show up as awarded.
 CLAIM_TIMEOUT = float(os.getenv("CLAIM_TIMEOUT", "300"))
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "1.0"))
 
 ARTIFACTS_DIR = Path(os.getenv("ARTIFACTS_DIR", "/app/artifacts"))
 
-#: Exact label first (what the userscript matches), then a tolerant form for
-#: locales or amounts such as "Claim 25,000 Buzz".
-CLAIM_TEXT = os.getenv("CLAIM_TEXT", "Claim 25 Buzz")
-CLAIM_RE = re.compile(r"claim\s*[\d,]*\s*buzz", re.I)
-
 EXIT_OK = 0
 EXIT_FAIL = 1
 EXIT_CONFIG = 2
+
+#: Exact label first, then a tolerant form for locales/amounts.
+CLAIM_TEXT = os.getenv("CLAIM_TEXT", "Claim 25 Buzz")
+CLAIM_RE = re.compile(r"claim\s*[\d,]*\s*buzz", re.I)
+
+#: tRPC procedures (observed on /generate, see module docstring).
+PROC_REWARDS = "user.userRewardDetails"
+PROC_CLAIM = "buzz.claimDailyBoostReward"
+PROC_ACCOUNT = "buzz.getBuzzAccount"
 
 
 # --------------------------------------------------------------------------- #
@@ -185,12 +201,99 @@ def install_cookies(driver, pairs: list[tuple[str, str]]) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# tRPC (runs inside the page, so Cloudflare cookies + same-origin apply)
+# --------------------------------------------------------------------------- #
+
+
+class CookieRejected(Exception):
+    """The page accepted the session but the API says we are not logged in."""
+
+
+def _trpc_get(driver, procedure: str) -> dict:
+    return driver.execute_async_script(
+        """
+        const proc = arguments[0], done = arguments[arguments.length - 1];
+        const url = '/api/trpc/' + proc + '?input=' +
+            encodeURIComponent(JSON.stringify({ json: { authed: true } }));
+        fetch(url, { credentials: 'include', headers: { accept: 'application/json' } })
+          .then(async (r) => done({ status: r.status, body: await r.text() }))
+          .catch((e) => done({ status: 0, body: String(e) }));
+        """,
+        procedure,
+    )
+
+
+def _trpc_post(driver, procedure: str, payload=None) -> dict:
+    return driver.execute_async_script(
+        """
+        const proc = arguments[0], body = arguments[1];
+        const done = arguments[arguments.length - 1];
+        fetch('/api/trpc/' + proc, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          body: JSON.stringify({ json: body }),
+        })
+          .then(async (r) => done({ status: r.status, body: await r.text() }))
+          .catch((e) => done({ status: 0, body: String(e) }));
+        """,
+        procedure,
+        payload,
+    )
+
+
+def _decode(response: dict) -> object:
+    """Unwrap a tRPC envelope: result.data.json (or raise with the error text)."""
+    if not response or not response.get("status"):
+        raise WebDriverException(f"tRPC request failed: {response}")
+    status = response["status"]
+    body = response.get("body") or ""
+    if status in (401, 403):
+        raise CookieRejected(f"HTTP {status}: session is not authenticated")
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        raise WebDriverException(f"tRPC returned HTTP {status}: {body[:200]}")
+    if isinstance(payload, dict) and payload.get("error"):
+        err = payload["error"]
+        message = (err.get("json") or {}).get("message") or str(err)
+        raise WebDriverException(f"tRPC error: {message}")
+    return ((payload.get("result") or {}).get("data") or {}).get("json")
+
+
+def fetch_rewards(driver) -> list[dict]:
+    data = _decode(_trpc_get(driver, PROC_REWARDS))
+    if not isinstance(data, list):
+        raise WebDriverException(f"Unexpected userRewardDetails payload: {data!r}")
+    return data
+
+
+def fetch_balance(driver) -> dict:
+    try:
+        data = _decode(_trpc_get(driver, PROC_ACCOUNT))
+        return data if isinstance(data, dict) else {}
+    except (WebDriverException, CookieRejected):
+        return {}
+
+
+def daily_boost(rewards: list[dict]) -> dict | None:
+    return next((r for r in rewards if r.get("type") == "dailyBoost"), None)
+
+
+def is_awarded(boost: dict | None) -> bool:
+    if not boost:
+        return False
+    return int(boost.get("awarded") or 0) > 0 or int(boost.get("awardedCount") or 0) > 0
+
+
+# --------------------------------------------------------------------------- #
 # Browser
 # --------------------------------------------------------------------------- #
 
 
 def safe_quit(driver, timeout: float = 15.0) -> None:
     """driver.quit() can block forever in a container; never let it hold us."""
+
     def _quit():
         try:
             driver.quit()
@@ -207,7 +310,11 @@ def safe_quit(driver, timeout: float = 15.0) -> None:
 def build_driver():
     driver_path = os.getenv("WEBDRIVER_PATH")
     if not driver_path:
-        for candidate in ("/usr/bin/chromedriver", "/usr/bin/msedgedriver"):
+        for candidate in (
+            "/usr/bin/chromedriver",
+            "/usr/lib/chromium/chromedriver",
+            "/usr/bin/msedgedriver",
+        ):
             if Path(candidate).exists():
                 driver_path = candidate
                 break
@@ -218,7 +325,6 @@ def build_driver():
         "--disable-dev-shm-usage",
         "--window-size=1440,900",
         "--lang=en-US",
-        f"--user-agent={USER_AGENT}",
         "--disable-blink-features=AutomationControlled",
         "--use-gl=angle",
         "--use-angle=swiftshader",
@@ -234,6 +340,9 @@ def build_driver():
         "--metrics-recording-only",
         "--mute-audio",
     ]
+    # Only override the UA when the operator supplied one. Never ship a literal.
+    if USER_AGENT:
+        args.append(f"--user-agent={USER_AGENT}")
     if HEADLESS:
         args.insert(0, "--headless=new")
 
@@ -272,9 +381,60 @@ def build_driver():
     return driver
 
 
+def wait_for_cloudflare(driver, timeout: float) -> bool:
+    """Cloudflare's challenge is JS-driven; give the browser time to clear it."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        title = (driver.title or "").lower()
+        if "just a moment" not in title and "attention required" not in title:
+            text = page_text(driver)[:600].lower()
+            if "verifying you are human" not in text and "enable javascript and cookies" not in text:
+                return True
+        time.sleep(1)
+    return False
+
+
 # --------------------------------------------------------------------------- #
-# The only job: find and press "Claim 25 Buzz"
+# Claim paths
 # --------------------------------------------------------------------------- #
+
+
+def claim_via_api(driver) -> str:
+    """Returns claimed | already | no-reward | failed."""
+    rewards = fetch_rewards(driver)
+    boost = daily_boost(rewards)
+    if boost is None:
+        log("userRewardDetails has no 'dailyBoost' entry")
+        return "no-reward"
+
+    log(
+        "dailyBoost: awardAmount={} awarded={} awardedCount={}".format(
+            boost.get("awardAmount"), boost.get("awarded"), boost.get("awardedCount")
+        )
+    )
+    if is_awarded(boost):
+        return "already"
+
+    before = fetch_balance(driver)
+    log(f"Buzz balance before: {before or 'unknown'}")
+
+    response = _trpc_post(driver, PROC_CLAIM, payload=None)
+    log(f"claimDailyBoostReward -> HTTP {response.get('status')} {str(response.get('body'))[:160]}")
+
+    deadline = time.time() + min(CLAIM_TIMEOUT, 60)
+    while time.time() < deadline:
+        try:
+            if is_awarded(daily_boost(fetch_rewards(driver))):
+                after = fetch_balance(driver)
+                log(f"Buzz balance after: {after or 'unknown'}")
+                return "claimed"
+        except WebDriverException as exc:
+            log(f"Verification query failed: {exc}")
+        time.sleep(POLL_INTERVAL)
+    return "failed"
+
+
+# ---- DOM fallback: the original userscript behaviour ----------------------- #
 
 FIND_JS = """
 const exact = arguments[0];
@@ -287,13 +447,12 @@ if (!match) {
                           || rx.test(b.getAttribute('aria-label') || ''));
 }
 if (!match) return '';
-match.setAttribute('data-ndf-claim', '1');
+match.setAttribute('data-civitai-claim', '1');
 return (match.textContent || '').trim();
 """
 
 
 def find_claim_button(driver):
-    """Locate the button the way the userscript does, straight from the DOM."""
     try:
         label = driver.execute_script(FIND_JS, CLAIM_TEXT, CLAIM_RE.pattern)
     except (JavascriptException, WebDriverException):
@@ -301,7 +460,7 @@ def find_claim_button(driver):
     if not label:
         return None
     try:
-        return driver.find_element(By.CSS_SELECTOR, "[data-ndf-claim='1']")
+        return driver.find_element(By.CSS_SELECTOR, "[data-civitai-claim='1']")
     except (NoSuchElementException, WebDriverException):
         return None
 
@@ -327,33 +486,8 @@ def dismiss_tour(driver) -> None:
             continue
 
 
-def already_claimed(driver) -> bool:
-    text = page_text(driver).lower()
-    return any(
-        phrase in text
-        for phrase in ("already claimed", "come back tomorrow", "come back in", "claimed today")
-    )
-
-
-def is_logged_in(driver) -> bool:
-    """Logged out pages show a 'Sign in' button and no account menu."""
-    try:
-        for element in driver.find_elements(By.XPATH, "//button[normalize-space(.)='Sign in']"):
-            if visible(driver, element):
-                return False
-    except WebDriverException:
-        pass
-    try:
-        return any(
-            visible(driver, e)
-            for e in driver.find_elements(By.CSS_SELECTOR, "[aria-label='Account menu']")
-        )
-    except WebDriverException:
-        return False
-
-
-def claim(driver) -> str:
-    """Poll for the button, click it once, then confirm."""
+def claim_via_dom(driver) -> str:
+    """Poll for the button, click it once, then confirm through the API."""
     deadline = time.time() + CLAIM_TIMEOUT
     tries = 0
 
@@ -370,26 +504,26 @@ def claim(driver) -> str:
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # Confirm: the bar disappears, or the page says so.
             confirm_deadline = time.time() + 30
             while time.time() < confirm_deadline:
-                text = page_text(driver).lower()
-                if any(word in text for word in ("claimed", "you got", "+25", "success")):
-                    return "claimed"
-                if already_claimed(driver):
-                    return "already"
+                try:
+                    if is_awarded(daily_boost(fetch_rewards(driver))):
+                        return "claimed"
+                except (WebDriverException, CookieRejected):
+                    pass
                 if find_claim_button(driver) is None:
                     return "claimed"
                 time.sleep(POLL_INTERVAL)
-
-            log("Clicked, but no confirmation appeared")
             return "clicked"
 
-        if already_claimed(driver):
-            return "already"
+        try:
+            if is_awarded(daily_boost(fetch_rewards(driver))):
+                return "already"
+        except (WebDriverException, CookieRejected):
+            pass
         time.sleep(POLL_INTERVAL)
 
-    return "none" if is_logged_in(driver) else "failed"
+    return "none"
 
 
 # --------------------------------------------------------------------------- #
@@ -404,7 +538,7 @@ def get_cookie(args) -> str:
     if not raw:
         raise SystemExit(
             "Missing cookie.\n"
-            "  Docker : docker run --rm -e CIVITAI_COOKIE='a=b; c=d' civitai-buzz\n"
+            "  Docker : docker run --rm -e CIVITAI_COOKIE='a=b; c=d' -e USER_AGENT='...' civitai-buzz\n"
             "  Local  : python buzz.py --cookie 'a=b; c=d'\n"
             "  Where  : DevTools -> Network -> any request -> Request Headers -> Cookie"
         )
@@ -420,7 +554,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cookie", help="full cookie header value")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--visible", action="store_true", help="show the browser window")
-    parser.add_argument("--timeout", type=float, help="seconds to wait for the button")
+    parser.add_argument("--check", action="store_true", help="report state without claiming")
+    parser.add_argument("--timeout", type=float, help="seconds to wait for the claim")
     args = parser.parse_args(argv or sys.argv[1:])
 
     DEBUG = DEBUG or args.debug
@@ -445,37 +580,64 @@ def main(argv: list[str] | None = None) -> int:
     try:
         driver = build_driver()
         driver.set_page_load_timeout(90)
+        driver.set_script_timeout(90)
         log(f"Installed {install_cookies(driver, pairs)} cookie entries")
 
         driver.get(SITE_URL)
-        time.sleep(3)
-
-        title = (driver.title or "").lower()
-        body = page_text(driver)[:400].lower()
-        if "just a moment" in title or "security verification" in body:
-            log("Cloudflare is still challenging this session (refresh cf_clearance)")
+        log("Waiting for Cloudflare / app boot")
+        if not wait_for_cloudflare(driver, CF_TIMEOUT):
+            log("Cloudflare is still challenging this session (refresh the cookie / user-agent)")
             save_artifacts(driver, "cloudflare")
             return EXIT_FAIL
+        log(f"Page ready: {driver.title!r}")
 
-        log(f"Waiting up to {CLAIM_TIMEOUT:.0f}s for '{CLAIM_TEXT}'")
-        result = claim(driver)
+        # Confirm the session before doing anything else.
+        try:
+            fetch_rewards(driver)
+        except CookieRejected as exc:
+            log(f"Cookie rejected ({exc}). Log in again and copy a fresh Cookie header.")
+            save_artifacts(driver, "cookie-rejected")
+            return EXIT_FAIL
+
+        if args.check:
+            boost = daily_boost(fetch_rewards(driver))
+            log(f"dailyBoost: {json.dumps(boost, ensure_ascii=False) if boost else 'missing'}")
+            log(f"Buzz balance: {fetch_balance(driver)}")
+            return EXIT_OK
+
+        result = "failed"
+        try:
+            result = claim_via_api(driver)
+        except CookieRejected as exc:
+            log(f"Cookie rejected ({exc})")
+            save_artifacts(driver, "cookie-rejected")
+            return EXIT_FAIL
+        except WebDriverException as exc:
+            log(f"API claim failed ({exc}); falling back to the button")
+
+        if result in {"already", "claimed"}:
+            if result == "already":
+                log("Nothing to do: today's 25 Buzz was already claimed")
+            else:
+                log("Done: +25 Buzz")
+            return EXIT_OK
+
+        log("Falling back to DOM click")
+        result = claim_via_dom(driver)
 
         if result in {"claimed", "clicked"}:
-            log("Done: +25 Buzz")
-            return EXIT_OK
+            log("Done: +25 Buzz" if result == "claimed" else "Clicked, but could not verify the award")
+            return EXIT_OK if result == "claimed" else EXIT_FAIL
         if result == "already":
-            log("Nothing to do: already claimed today")
+            log("Nothing to do: today's 25 Buzz was already claimed")
             return EXIT_OK
-        if result == "none":
-            log(
-                "The claim button never appeared (already claimed today, or this "
-                "account is not eligible). Set STRICT=true to treat it as a failure."
-            )
-            if not STRICT:
-                return EXIT_OK
 
+        log(
+            "No claim was possible: the reward entry is missing, already claimed, or "
+            "this account is not eligible. Set STRICT=true to treat it as a failure."
+        )
         save_artifacts(driver, "claim-failed")
-        return EXIT_FAIL
+        return EXIT_FAIL if STRICT else EXIT_OK
 
     except TimeoutException as exc:
         log(f"Timed out: {exc}")

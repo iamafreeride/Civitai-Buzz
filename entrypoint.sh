@@ -1,16 +1,21 @@
 #!/bin/sh
-# Run the claimer, optionally on a virtual display.
+# Run the claimer, optionally on a virtual display, and let it exit on success.
 #
 #   HEADLESS=true  (default) -> plain headless Chrome
 #   HEADLESS=false           -> Xvfb + headed Chrome, which looks much more like
-#                               a normal browser to Cloudflare and to the
-#                               page's own client-side feature checks.
+#                               a normal browser to Cloudflare.
 #
-# Started manually instead of via xvfb-run: xvfb-run wraps the whole process and
-# gives no output when it fails, which looks exactly like a hang.
+# The process (and therefore the container) ends as soon as buzz.py exits:
+# exit 0 = claimed / already claimed today, non-zero = see README exit codes.
 set -e
 
-echo "[entrypoint] HEADLESS=${HEADLESS:-true} DISPLAY=${DISPLAY:-<unset>} USER=$(id -un)"
+if [ -z "${CIVITAI_COOKIE:-}" ]; then
+    echo "[entrypoint] CIVITAI_COOKIE is not set." >&2
+    echo "[entrypoint] Usage: docker run --rm -e CIVITAI_COOKIE='a=b; c=d' -e USER_AGENT='...' civitai-buzz" >&2
+    exit 2
+fi
+
+echo "[entrypoint] user=$(id -un) headless=${HEADLESS:-true} display=${DISPLAY:-<unset>}"
 
 if [ "${HEADLESS:-true}" = "false" ] || [ "${HEADLESS:-true}" = "0" ]; then
     if [ -z "${DISPLAY:-}" ]; then
@@ -24,8 +29,10 @@ if [ "${HEADLESS:-true}" = "false" ] || [ "${HEADLESS:-true}" = "0" ]; then
     export HEADLESS=false
 fi
 
+# RUN_TIMEOUT is the hard stop so a stuck browser can never keep the container
+# alive forever; a normal run finishes in well under a minute.
 echo "[entrypoint] launching: python3 buzz.py $*"
 if command -v timeout >/dev/null 2>&1; then
-    exec timeout "${RUN_TIMEOUT:-1200}" python3 buzz.py "$@"
+    exec timeout "${RUN_TIMEOUT:-900}" python3 buzz.py "$@"
 fi
 exec python3 buzz.py "$@"

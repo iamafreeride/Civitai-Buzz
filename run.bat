@@ -1,18 +1,16 @@
 @echo off
 rem ---------------------------------------------------------------------------
-rem  Civitai daily 25 Buzz
-rem  Double-click on Windows. First run creates .venv and installs selenium.
-rem  Paste your cookie string when asked (or put CIVITAI_COOKIE=... in .env).
+rem  Civitai daily 25 Buzz  (Windows, no Docker)
+rem  Double-click to run. First run creates .venv and installs selenium.
+rem
+rem  Cookie / User-Agent are asked here and kept in this process only.
+rem  Nothing is written to disk - do not put them in a file inside this repo.
 rem ---------------------------------------------------------------------------
 setlocal
 cd /d "%~dp0"
 
-if exist ".env" (
-    for /f "usebackq tokens=1,* delims==" %%A in (".env") do (
-        if /i "%%A"=="CIVITAI_COOKIE" set "CIVITAI_COOKIE=%%B"
-        if /i "%%A"=="USER_AGENT" set "USER_AGENT=%%B"
-    )
-)
+if not defined CIVITAI_COOKIE set /p CIVITAI_COOKIE=Cookie (name=value; ...): 
+if not defined USER_AGENT set /p USER_AGENT=User-Agent (optional, Enter to skip): 
 
 if not exist ".venv\Scripts\python.exe" (
     echo [setup] Creating virtual environment...
@@ -22,7 +20,6 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 if not defined BROWSER set "BROWSER=edge"
-if not defined SE_CACHE_PATH set "SE_CACHE_PATH=%~dp0.selenium"
 
 ".venv\Scripts\python.exe" buzz.py %*
 set "RC=%ERRORLEVEL%"
@@ -32,7 +29,7 @@ if "%RC%"=="0" (
     echo Done.
 ) else (
     echo Finished with exit code %RC%.
-    echo If Cloudflare blocked it, refresh cf_clearance and make USER_AGENT match your browser.
+    echo If Cloudflare blocked it, refresh the cookie and make USER_AGENT match your browser.
 )
 echo.
 pause

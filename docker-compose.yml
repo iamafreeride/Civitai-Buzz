@@ -4,11 +4,19 @@ services:
     image: civitai-buzz:latest
     container_name: civitai-buzz
 
-    # CIVITAI_COOKIE=... lives in .env
-    env_file:
-      - .env
+    # Secrets come from your shell, not from a file inside this repo:
+    #   export CIVITAI_COOKIE='...'; export USER_AGENT='...'
+    #   docker compose up --build
+    environment:
+      - CIVITAI_COOKIE
+      - USER_AGENT
+      - HEADLESS=${HEADLESS:-true}
+      - CLAIM_TIMEOUT=${CLAIM_TIMEOUT:-300}
+      - DEBUG=${DEBUG:-false}
 
+    # One-shot job: the process exits after claiming, so the container stops.
     restart: "no"
+    init: true
     shm_size: "1g"
 
     volumes:

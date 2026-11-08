@@ -3,17 +3,21 @@
 FROM python:3.13-slim-bookworm
 
 LABEL org.opencontainers.image.title="civitai-buzz" \
-      org.opencontainers.image.description="Claim the daily 25 Buzz on Civitai using your own browser cookie" \
+      org.opencontainers.image.description="Claim the daily 25 Buzz on Civitai, then exit" \
       org.opencontainers.image.licenses="MIT"
 
+# Runtime knobs only. CIVITAI_COOKIE / USER_AGENT are supplied at `docker run`
+# time and are deliberately absent from this file, the image layers and git.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive \
     ARTIFACTS_DIR=/app/artifacts \
     BROWSER=chrome \
-    WEBDRIVER_PATH=/usr/bin/chromedriver
+    WEBDRIVER_PATH=/usr/bin/chromedriver \
+    HEADLESS=true
 
-# xvfb lets us run a headed browser when HEADLESS=false.
+# xvfb + xauth let us run a headed browser (HEADLESS=false) when Cloudflare
+# wants a real, rendered window.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         chromium \
