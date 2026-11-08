@@ -2,49 +2,48 @@
 
 每天自動領取 Civitai 的 **25 Buzz**。
 
-用你瀏覽器裡的 Cookie 登入，開啟 <https://civitai.red/>，點導覽列的 **Create**，
-在彈出選單中按 **Claim 25 Buzz**，成功後結束。
+用你瀏覽器裡的 Cookie 登入，開啟 <https://civitai.red/generate>，等 `Claim 25 Buzz`
+出現就按下去，成功後結束。
 
-結構沿用 [simao-silva/noip-renewer](https://github.com/simao-silva/noip-renewer)（MIT）：
-無頭瀏覽器 + 一次性執行 + 明確退出碼，跑完就結束（`docker run --rm` 會自動移除容器）。
+## 參考來源與取捨
 
----
+實作參考 Greasy Fork 的
+[Civitai Auto-Clicker for Buzz and Follow](https://greasyfork.org/scripts/509803-civitai-auto-clicker-for-buzz-and-follow)
+（MIT）。那個腳本的核心其實只有三行邏輯：
 
-## 為什麼用 Cookie，而不是帳密
+```js
+Array.from(document.querySelectorAll('button'))
+     .find(b => b.textContent.trim() === 'Claim 25 Buzz')
+// 每秒輪詢 + MutationObserver，按鈕可見且未 disabled 就 click()
+```
 
-`civitai.red` 在 Cloudflare 後面。實測（headless 與非 headless 都試過）只會拿到
-`Just a moment...` 的驗證頁，沒有任何登入表單可以操作。
+它另外附帶的東西我**沒有**移植，因為與「領取 Buzz」無關：
 
-真正能過去的東西是 `cf_clearance` 這張通行證，而它**綁定 IP + User-Agent**。
-所以本專案直接把你瀏覽器裡那組 cookie 灌進無頭瀏覽器，並讓你指定同一組 UA。
-
-> 結論：**請在產生 cookie 的同一台機器／同一個網路執行**，並讓 `USER_AGENT` 與該瀏覽器一致。
-
----
+| 原腳本功能 | 處理 |
+|---|---|
+| `Follow` 三個頁面 | ❌ 移除 |
+| `sessionStorage` 記錄已點次數 | ❌ 移除（每次執行本來就只領一次） |
+| MutationObserver + 每秒輪詢 | ✅ 保留，改用 Selenium 輪詢 DOM |
+| 「按鈕可見才點」的 `offsetParent` 判斷 | ✅ 保留（`getClientRects()`） |
 
 ## 流程
 
-1. 啟動 Chromium（可無頭），先灌入 cookie（含 `cf_clearance`）。
+1. 啟動 Chromium（可無頭，也可用 Xvfb 開有頭），先灌入 cookie（含 `cf_clearance`）。
 2. 開啟 <https://civitai.red/generate>；若仍是 Cloudflare 驗證頁，直接失敗並提示更新 cookie。
-3. 關掉首次進入生成頁可能出現的導覽視窗（Skip / Close）。
-4. 在頁面上找文字符合 `Claim 25 Buzz` 的按鈕並點擊；找不到就依序改看 buzz 彈窗、帳號選單、Create 選單。
-5. 等出現 claimed／success 字樣或按鈕消失。
-6. 若四個位置都沒有領取項目（今天已領／不符資格），印出畫面所有按鈕並以 exit 0 結束。
+3. 每秒掃描一次 DOM，找文字等於 `Claim 25 Buzz` 的按鈕（找不到再用寬鬆比對，容納 `Claim 25,000 Buzz` 之類）。
+4. 按鈕可見且未 disabled → 點擊。
+5. 等按鈕消失或出現 claimed／success 字樣；若等了整個 `CLAIM_TIMEOUT` 都沒有按鈕，視為今日已領（exit 0）。
 
-> 若你的版面是把 `Claim 25 Buzz` 放在 Create 下拉選單裡，程式也會自動退回那條路徑
-> （Create 是分裂按鈕：左邊跳 /create，右邊箭頭才開選單）。
-> 找不到時會把選單內容印出來，方便判斷是「沒登入」還是「已領過」。
-
----
+> 這個網站很晚才把按鈕掛上去，而且 headless 瀏覽器有時根本不會渲染它——所以有 `HEADLESS=false`（Xvfb）模式可切換。
 
 ## 取得 Cookie
 
 1. Chrome/Edge 開 <https://civitai.red/> 並確認已登入。
 2. `F12` → **Network** → 重新整理 → 點任一 `civitai.red` 請求。
-3. **Request Headers** → `Cookie` → 整段複製（會長這樣：`civitai-token=...; cf_clearance=...; ...`）。
-4. 同時記下你的 **User-Agent**：同一頁的 Request Headers 裡就有。
+3. **Request Headers** → `Cookie` → 整段複製（`__Secure-civ-token=...; __Secure-civ-device=...; ...`）。
+4. 順手記下同一頁的 **User-Agent**。
 
----
+> `cf_clearance` 綁 IP + User-Agent，若被 Cloudflare 擋住就要一起帶上，並讓 `USER_AGENT` 與瀏覽器一致。
 
 ## 快速開始
 
@@ -54,66 +53,48 @@
 docker build -t civitai-buzz .
 
 docker run --rm \
-  -e CIVITAI_COOKIE='civitai-token=...; cf_clearance=...' \
+  -e CIVITAI_COOKIE='__Secure-civ-token=...; __Secure-civ-device=...' \
   -e USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' \
   civitai-buzz
 ```
 
-用 compose（推薦，設定寫在 `.env`）：
+用 compose（設定寫在 `.env`）：
 
 ```bash
-cp .env.example .env    # 貼上 CIVITAI_COOKIE 與 USER_AGENT
+cp .env.example .env
 docker compose up --build
 ```
 
 ### B. Windows 本機（不用 Docker）
 
-1. 安裝 Python 3.9+（勾 *Add python.exe to PATH*）。
-2. **雙擊 `run.bat`**；第一次會建 `.venv` 並安裝 selenium。
-3. 沒設定 cookie 時會問你，貼上整段即可。
-
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
-.\.venv\Scripts\python buzz.py --cookie "civitai-token=...; cf_clearance=..."
+.\.venv\Scripts\python buzz.py --cookie "__Secure-civ-token=...; ..." --visible
 ```
 
-成功時：
-
-```
-[15:20:01] Loaded 6 cookie(s): civitai-token, cf_clearance, ...
-[15:20:07] Opened Create menu
-[15:20:08] Clicking 'Claim 25 Buzz'
-[15:20:09] Buzz claimed
-[15:20:09] Done: +25 Buzz
-```
-
----
+或雙擊 `run.bat`（會問你貼 cookie）。
 
 ## 環境變數
 
 | 變數 | 預設 | 說明 |
 |---|---|---|
-| `CIVITAI_COOKIE` | 必填 | 整段 Cookie header（含 `cf_clearance`） |
-| `USER_AGENT` | Chrome 157 (Win64) | 必須與產生 cookie 的瀏覽器一致 |
-| `CLAIM_TIMEOUT` | `150` | 等領取鈕出現的秒數（這站是延遲渲染） |
-| `STRICT` | `false` | `true` = 找不到領取項目就 exit 1（預設視為今日已領） |
-| `CIVITAI_URL` | `https://civitai.red/generate` | 站台網址（給純網域會自動接 `/generate`） |
-| `HEADLESS` | `true` | `false` = 用 Xvfb 開**有頭**瀏覽器（最像真瀏覽器，見下方說明） |
-| `DEBUG` | `false` | 失敗時把截圖與 DOM 存到 `artifacts/` |
-| `BROWSER` | `chrome` | `chrome`（容器）或 `edge`（Windows） |
-
----
+| `CIVITAI_COOKIE` | 必填 | 整段 Cookie header |
+| `USER_AGENT` | Chrome 157 (Win64) | 建議與產生 cookie 的瀏覽器一致 |
+| `CIVITAI_URL` | `https://civitai.red/generate` | 給純網域會自動接 `/generate` |
+| `HEADLESS` | `true` | `false` = Xvfb + 有頭 Chrome（最像真瀏覽器） |
+| `CLAIM_TIMEOUT` | `300` | 等按鈕出現的秒數 |
+| `CLAIM_TEXT` | `Claim 25 Buzz` | 按鈕精確文字 |
+| `STRICT` | `false` | `true` = 等不到按鈕就 exit 1 |
+| `DEBUG` | `false` | 失敗時存截圖與 DOM 到 `artifacts/` |
 
 ## 退出碼
 
 | 代碼 | 意義 |
 |---|---|
 | `0` | 已領取，或今天已經領過 |
-| `1` | 失敗：Cloudflare 擋住、找不到 Create／Claim、逾時 |
+| `1` | 失敗：Cloudflare 擋住、cookie 失效、瀏覽器錯誤 |
 | `2` | 設定錯誤：沒有 cookie 或格式不對 |
-
----
 
 ## 排程（每天一次）
 
@@ -123,72 +104,40 @@ python -m venv .venv
 
 Windows 工作排程器：程式填 `run.bat`（要背景跑就把最後的 `pause` 拿掉）。
 
-> `cf_clearance` 會過期（通常數小時到數天）。排程失敗時，重新抓一次 cookie 即可。
-
----
-
-## 為什麼有時候看不到「Claim 25 Buzz」
-
-實測（2026-11，同一個帳號、未領取狀態）：
-
-| 環境 | 結果 |
-|---|---|
-| 你平常的瀏覽器 | 左側面板底部出現一整條 `Claim 25 Buzz` |
-| 容器內 headless Chrome（1440×900 / 480×900） | 整頁 DOM 完全沒有 `Claim 25` 字串（等了 3 分鐘） |
-
-也就是說這個按鈕會被「你的瀏覽器長得像不像真的」影響。因此映像內建了 **Xvfb**：
-
-```bash
-docker run --rm \
-  -e CIVITAI_COOKIE='...' \
-  -e HEADLESS=false \
-  -v "${PWD}/artifacts:/app/artifacts" \
-  iamafreeride/civitai-buzz:latest
-```
-
-`HEADLESS=false` 時會用虛擬螢幕跑**有頭** Chrome（1440×900），並啟用軟體 WebGL
-（`--use-angle=swiftshader`），讓頁面內的模型載入器能跑完——這是最接近你真實瀏覽器的模式。
-
-若還是不出現，把 `artifacts/*.png` 給我，我對著實際畫面再調整。
+> `__Secure-civ-token` 會過期（你的那組 exp 約一個月）。排程失敗時重抓 cookie 即可。
 
 ## 疑難排解
 
 **一直停在 Cloudflare**
-- `cf_clearance` 過期了 → 重新抓 cookie。
-- UA 不一致 → `USER_AGENT` 必須與瀏覽器完全相同。
-- IP 不一致 → 在別的網路／機器跑就會失效；請在同一台機器跑，或改用 `HEADLESS=false`。
+`cf_clearance` 過期或 UA 不一致 → 重抓 cookie、對齊 `USER_AGENT`，並在產生 cookie 的同一台機器／網路執行。
 
-**找不到 Create 按鈕**
-代表頁面根本沒載入成功（還是驗證頁），或被導到登入頁。開 `DEBUG=true` 看 `artifacts/*.png`。
+**等滿 300 秒都沒出現按鈕**
+- 先確認帳號今天真的還沒領。
+- 換 `HEADLESS=false`（Xvfb）再試——我實測 headless 模式整頁 DOM 完全沒有這個按鈕，有頭模式才可能出現。
+- 開 `DEBUG=true`，把 `artifacts/*.png` 留下來看實際畫面。
 
-**找不到 Claim 25 Buzz**
-程式會依序找：頁面 → buzz 彈窗 → 帳號選單 → Create 選單，並把每一步的內容印出來。
-實測（2026-11）已領過的帳號在 `/generate` 的整頁 HTML 裡完全沒有 `Claim 25` 字串，
-所以「四個位置都沒有」通常就是**今天已領**，此時 exit 0。
-若你要它因此報錯（例如排程監控），加 `-e STRICT=true`。
-
----
+**按鈕文字不同**
+用 `CLAIM_TEXT` 覆蓋，例如 `-e CLAIM_TEXT='Claim 25 Buzz'`；寬鬆比對已涵蓋 `Claim 25,000 Buzz`。
 
 ## 專案結構
 
 ```
 .
-├── buzz.py                  # 灌 cookie → 開 Create → Claim 25 Buzz
+├── buzz.py                  # cookie → 開 /generate → 等按鈕 → 點擊
+├── entrypoint.sh            # HEADLESS=false 時自動套 xvfb-run
 ├── run.bat                  # Windows 一鍵執行
-├── Dockerfile               # Debian + Chromium + chromedriver
+├── Dockerfile               # Debian + Chromium + chromedriver + Xvfb
 ├── docker-compose.yml
-├── requirements.txt
-├── .env.example
 └── .github/workflows/docker.yml
 ```
 
 ## 免責聲明
 
 - 僅供**你自己的帳號**、每天一次使用。
-- Cookie 等同帳號憑證，請勿外流；本專案只把它放進你本機的瀏覽器 session，不會上傳。
+- Cookie 等同帳號憑證，請勿外流。
 - 這是瀏覽器自動化，站方改版或 Cloudflare 政策變動就可能失效，風險自負。
 - 與 Civitai 官方無任何關係。
 
 ## License
 
-MIT，見 [LICENSE](LICENSE)。
+MIT，見 [LICENSE](LICENSE)。輪詢邏輯參考 [Fontkodo 的 userscript](https://greasyfork.org/scripts/509803-civitai-auto-clicker-for-buzz-and-follow)（MIT）。
