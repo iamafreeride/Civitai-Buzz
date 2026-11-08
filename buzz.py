@@ -22,6 +22,7 @@ import argparse
 import os
 import re
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -188,6 +189,21 @@ def install_cookies(driver, pairs: list[tuple[str, str]]) -> int:
 # --------------------------------------------------------------------------- #
 
 
+def safe_quit(driver, timeout: float = 15.0) -> None:
+    """driver.quit() can block forever in a container; never let it hold us."""
+    def _quit():
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+    thread = threading.Thread(target=_quit, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        log("Browser did not shut down cleanly; exiting anyway")
+
+
 def build_driver():
     driver_path = os.getenv("WEBDRIVER_PATH")
     if not driver_path:
@@ -208,6 +224,15 @@ def build_driver():
         "--use-angle=swiftshader",
         "--enable-unsafe-swiftshader",
         "--ignore-gpu-blocklist",
+        # headed-in-container hygiene: no first-run dialogs, no background sync
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-sync",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-features=Translate,MediaRouter",
+        "--metrics-recording-only",
+        "--mute-audio",
     ]
     if HEADLESS:
         args.insert(0, "--headless=new")
@@ -464,10 +489,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_FAIL
     finally:
         if driver is not None:
-            try:
-                driver.quit()
-            except WebDriverException:
-                pass
+            safe_quit(driver)
 
 
 if __name__ == "__main__":
