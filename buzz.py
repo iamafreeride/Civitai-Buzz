@@ -84,7 +84,14 @@ EXIT_CONFIG = 2
 
 
 def log(message: str) -> None:
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}", flush=True)
+    text = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
+    try:
+        print(text, flush=True)
+    except UnicodeEncodeError:
+        # Windows consoles default to cp950/cp1252; emoji in button labels
+        # must not take the whole run down.
+        encoding = sys.stdout.encoding or "utf-8"
+        print(text.encode(encoding, "replace").decode(encoding, "replace"), flush=True)
 
 
 def norm(text: str | None) -> str:
@@ -303,11 +310,11 @@ def menu_items(driver) -> list[str]:
 
 
 def find_claim_button(driver):
-    """Any visible 'Claim 25 Buzz' control on the page (button, link, menuitem)."""
+    """Any visible 'Claim 25 Buzz' control (button, link, menuitem, aria-label)."""
     try:
         elements = driver.find_elements(
             By.CSS_SELECTOR,
-            "button, [role='button'], [role='menuitem'], a",
+            "button, [role='button'], [role='menuitem'], a, [aria-label]",
         )
     except WebDriverException:
         return None
@@ -315,10 +322,84 @@ def find_claim_button(driver):
     for element in elements:
         if not visible(element):
             continue
-        text = norm(element.text)
-        if text and CLAIM_RE.search(text):
-            return element
+        for candidate in (norm(element.text), norm(element.get_attribute("aria-label"))):
+            if candidate and CLAIM_RE.search(candidate):
+                return element
     return None
+
+
+def buzz_widget(driver) -> bool:
+    """The logged-in navbar keeps the buzz balance behind a popover trigger."""
+    try:
+        elements = driver.find_elements(
+            By.CSS_SELECTOR, "[aria-haspopup='dialog'], [aria-haspopup='menu']"
+        )
+    except WebDriverException:
+        return False
+
+    for element in elements:
+        if not visible(element):
+            continue
+        text = norm(element.text).lower()
+        if not text or len(text) > 40:
+            continue
+        if any(word in text for word in ("buy", "get buzz", "purchase", "top up")):
+            continue
+        if "buzz" in text or re.fullmatch(r"[\d,.\s]+", text):
+            if click(driver, element):
+                log(f"Opened buzz widget ({text!r})")
+                time.sleep(1.5)
+                return True
+    return False
+
+
+def open_account_menu(driver) -> bool:
+    """Daily claims are often tucked into the avatar menu rather than Create."""
+    try:
+        elements = driver.find_elements(By.CSS_SELECTOR, "button, [role='button']")
+    except WebDriverException:
+        return False
+
+    for element in elements:
+        if not visible(element):
+            continue
+        label = (norm(element.text) + " " + norm(element.get_attribute("aria-label"))).lower()
+        if any(word in label for word in ("sign in", "log in", "login", "support", "buy", "purchase")):
+            continue
+        if any(word in label for word in ("account", "profile", "avatar", "user menu", "my account")):
+            if click(driver, element):
+                log(f"Opened account menu ({label.strip()!r})")
+                time.sleep(1.5)
+                return True
+    return False
+
+
+def dump_ui(driver) -> None:
+    """Log what is actually on screen -- the fastest way to fix a selector."""
+    try:
+        log(f"Page: {driver.title!r} {driver.current_url}")
+    except WebDriverException:
+        pass
+
+    texts = []
+    try:
+        elements = driver.find_elements(By.CSS_SELECTOR, "button, [role='button']")
+    except WebDriverException:
+        return
+    for element in elements:
+        try:
+            if not visible(element):
+                continue
+            text = norm(element.text)
+            if text:
+                texts.append(text[:40])
+        except (StaleElementReferenceException, WebDriverException):
+            continue
+
+    if texts:
+        log(f"Visible buttons ({len(texts)}): {' | '.join(texts[:30])}")
+    else:
+        log("No visible buttons at all -- the page probably did not render")
 
 
 def dismiss_onboarding(driver) -> None:
@@ -402,29 +483,45 @@ def wait_for_claim_button(driver, timeout: float):
 
 
 def claim(driver) -> str:
-    """Return 'claimed', 'already' or 'failed'."""
+    """Return 'claimed', 'already' or 'failed'.
+
+    The claim control has moved around between Civitai releases, so this tries
+    the places it has been seen, cheapest first:
+      1. straight on the /generate page
+      2. the buzz balance popover in the navbar
+      3. the avatar / account menu
+      4. the Create menu (older layout)
+    """
     dismiss_onboarding(driver)
     time.sleep(1.0)
 
-    item, status = wait_for_claim_button(driver, CLAIM_TIMEOUT)
-    if status == "already":
-        log("Buzz already claimed today")
-        return "already"
+    attempts = [
+        ("page", None),
+        ("buzz widget", buzz_widget),
+        ("account menu", open_account_menu),
+        ("Create menu", open_create_menu),
+    ]
 
-    if item is None:
-        # Older layout: the entry lives inside the Create menu instead.
-        log("'Claim 25 Buzz' not on the page, trying the Create menu")
-        if open_create_menu(driver):
-            item, status = wait_for_claim_button(driver, CLAIM_TIMEOUT / 2)
-            if status == "already":
-                log("Buzz already claimed today")
-                return "already"
+    item = None
+    for name, opener in attempts:
+        if opener is not None:
+            if not opener(driver):
+                continue
+            log(f"Looking for the claim entry in the {name}")
+
+        item, status = wait_for_claim_button(driver, CLAIM_TIMEOUT if opener is None else CLAIM_TIMEOUT / 2)
+        if status == "already":
+            log("Buzz already claimed today")
+            return "already"
+        if item is not None:
+            break
 
     if item is None:
         labels = menu_items(driver)
         if labels:
-            log(f"Create menu contains: {' | '.join(labels)}")
+            log(f"Menu contains: {' | '.join(labels)}")
         log("'Claim 25 Buzz' not found on the page")
+        dump_ui(driver)
         return "failed"
 
     log("Clicking 'Claim 25 Buzz'")
