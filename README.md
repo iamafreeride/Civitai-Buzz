@@ -8,7 +8,7 @@
 
 「Claim 25 Buzz」按鈕只是表面，真正的動作是 tRPC mutation `buzz.claimDailyBoostReward`，伺服器端具冪等性（重複呼叫不會多給，所以重試是安全的）。
 
-1. 注入 `CIVITAI_COOKIE` 中的 cookie（`.civitai.red` 與 `.civitai.com`）。
+1. 注入 `CIVITAI_COOKIE` 中的 cookie；`__Host-` 開頭的登入 cookie 以 host-only 方式設定，其餘同步到 `.civitai.red` 與 `.civitai.com`。
 2. 開啟 `/generate`，等待 Cloudflare 驗證自行通過。
 3. 呼叫 `user.userRewardDetails` 檢查 `dailyBoost`：`awarded > 0` 表示今天已領（exit 0）；`awardedCount === 0` 則 `POST buzz.claimDailyBoostReward`。
 4. 再查一次確認 `awarded > 0`（最多等 `CLAIM_TIMEOUT` 秒），成功即 exit 0。
@@ -19,10 +19,13 @@
 ## 取得 Cookie 與 User-Agent
 
 1. 用 Chrome 或 Edge 登入 <https://civitai.red/>。
-2. `F12` → **Network** → 重新整理 → 點任一個 `civitai.red` 請求 → 在 **Request Headers** 複製完整的 `Cookie` 值（包含 `__Secure-civ-*`）。
+2. `F12` → **Network** → 重新整理 → 點任一個 `civitai.red` 請求 → 在 **Request Headers** 複製完整的 `Cookie` 值（`__Host-civ-*` 或舊版 `__Secure-civ-*` 都支援）。
 3. 在 Console 執行 `navigator.userAgent` 取得 User-Agent。
 
-`__Secure-civ-token` 約一個月到期，到期時重新取得即可。
+登入 token（`__Host-civ-token`／`__Secure-civ-token`）約一個月到期，到期時重新取得即可。
+
+> `__Host-` cookie 依規範必須是 **host-only、Secure、path=/、不能帶 Domain**。程式已分開處理；
+> 若把 `Domain` 套到 `__Host-` cookie 上，Chrome 會以 `Sanitizing cookie failed` 拒收，結果就是 401。
 
 ## 快速開始
 
@@ -97,7 +100,7 @@ Windows 工作排程器：執行 `run.bat`（請拿掉最後的 `pause`）。
 | 症狀 | 處理 |
 |---|---|
 | 卡在 Cloudflare | 重新取得 cookie、對齊 `USER_AGENT`，並在產生 cookie 的同一台機器／網路執行；必要時用 `HEADLESS=false` |
-| `Cookie rejected (HTTP 401)` | `__Secure-civ-token` 已過期，重新登入並複製新的 Cookie |
+| `Cookie rejected (HTTP 401)` | token 過期（重新登入取新 cookie），或舊版映像把 `__Host-` cookie 加上 Domain 而遭拒收（更新映像即可，日誌會顯示 `Cookie install refused by the browser`） |
 | 缺少 `dailyBoost` | 帳號可能不符資格，或網站改了型別；`STRICT=false` 時 exit 0 |
 | API 與 DOM 都失敗 | 設 `DEBUG=true` 查看 `artifacts/`，或改用 `HEADLESS=false` |
 | 驗證是否領到 | `buzz.getBuzzAccount` 的藍色餘額增加 25，且 `dailyBoost.awarded` 變成 25 |

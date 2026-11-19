@@ -8,7 +8,7 @@ Automatically claims the daily **25 Buzz** at <https://civitai.red/generate>. Th
 
 The "Claim 25 Buzz" button is just the surface; the real action is the tRPC mutation `buzz.claimDailyBoostReward`, which is idempotent on the server (repeated calls grant nothing extra, so retries are safe).
 
-1. Inject cookies from `CIVITAI_COOKIE` (`.civitai.red` and `.civitai.com`).
+1. Inject cookies from `CIVITAI_COOKIE`; `__Host-` session cookies are set host-only, the rest are mirrored to `.civitai.red` and `.civitai.com`.
 2. Open `/generate` and wait for the Cloudflare challenge to pass.
 3. Call `user.userRewardDetails` and check `dailyBoost`: `awarded > 0` means already claimed (exit 0); `awardedCount === 0` triggers `POST buzz.claimDailyBoostReward`.
 4. Query again to confirm `awarded > 0` (up to `CLAIM_TIMEOUT` seconds), then exit 0.
@@ -19,10 +19,14 @@ The "Claim 25 Buzz" button is just the surface; the real action is the tRPC muta
 ## Getting the Cookie and User-Agent
 
 1. Log in at <https://civitai.red/> with Chrome or Edge.
-2. `F12` → **Network** → refresh → click any `civitai.red` request → copy the full `Cookie` value from **Request Headers** (including `__Secure-civ-*`).
+2. `F12` → **Network** → refresh → click any `civitai.red` request → copy the full `Cookie` value from **Request Headers** (`__Host-civ-*` and legacy `__Secure-civ-*` are both supported).
 3. Run `navigator.userAgent` in the Console to get your User-Agent.
 
-`__Secure-civ-token` expires after about a month; grab a fresh cookie when it does.
+The session token (`__Host-civ-token` / `__Secure-civ-token`) expires after about a month; grab a fresh cookie when it does.
+
+> A `__Host-` cookie must be **host-only, Secure, path=/, and carry no Domain**. The
+> installer handles this; adding a Domain makes Chrome reject it with
+> `Sanitizing cookie failed`, which surfaces as HTTP 401.
 
 ## Quick start
 
@@ -97,7 +101,7 @@ Windows Task Scheduler: run `run.bat` (remove the trailing `pause`).
 | Symptom | Fix |
 |---|---|
 | Stuck at Cloudflare | Re-grab the cookie, align `USER_AGENT`, run on the same machine/network that produced the cookie; use `HEADLESS=false` if needed |
-| `Cookie rejected (HTTP 401)` | `__Secure-civ-token` expired; log in again and copy a new Cookie |
+| `Cookie rejected (HTTP 401)` | Token expired (log in again), or an older image added a Domain to the `__Host-` cookie so Chrome refused it (update the image; the log shows `Cookie install refused by the browser`) |
 | `dailyBoost` missing | Account may be ineligible or the site changed the type; exits 0 when `STRICT=false` |
 | Both API and DOM fail | Set `DEBUG=true` and check `artifacts/`, or try `HEADLESS=false` |
 | Verify the claim | Blue balance in `buzz.getBuzzAccount` rises by 25 and `dailyBoost.awarded` becomes 25 |

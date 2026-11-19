@@ -179,24 +179,49 @@ def parse_cookie_header(raw: str) -> list[tuple[str, str]]:
 
 
 def install_cookies(driver, pairs: list[tuple[str, str]]) -> int:
+    """Set every cookie; return how many CDP accepted.
+
+    Civitai moved its session cookies from ``__Secure-civ-*`` to ``__Host-civ-*``.
+    Chrome enforces the cookie prefixes: a ``__Host-`` cookie must be Secure,
+    path ``/`` and **host-only**, so passing a ``Domain`` makes CDP fail with
+    "Sanitizing cookie failed" and the session silently stays logged out
+    (HTTP 401). ``__Host-`` entries are therefore set through ``url`` with no
+    domain; everything else keeps the shared ``.civitai.red/.com`` domain.
+    """
     installed = 0
+    failures: set[str] = set()
+
     for name, value in pairs:
-        for domain in (".civitai.red", ".civitai.com"):
+        if name.startswith("__Host-"):
+            targets = [{"url": "https://civitai.red/", "path": "/"}]
+        else:
+            targets = [
+                {"url": "https://civitai.red/", "path": "/", "domain": ".civitai.red"},
+                {"url": "https://civitai.red/", "path": "/", "domain": ".civitai.com"},
+            ]
+        for target in targets:
             try:
-                driver.execute_cdp_cmd(
+                result = driver.execute_cdp_cmd(
                     "Network.setCookie",
                     {
                         "name": name,
                         "value": value,
-                        "domain": domain,
-                        "path": "/",
                         "secure": True,
-                        "httpOnly": False,
+                        "httpOnly": name.startswith(("__Host-", "__Secure-")),
+                        **target,
                     },
                 )
-                installed += 1
             except WebDriverException:
+                failures.add(name)
                 continue
+            # CDP answers {"success": false} instead of raising for a policy refusal.
+            if isinstance(result, dict) and result.get("success") is False:
+                failures.add(name)
+            else:
+                installed += 1
+
+    if failures:
+        log(f"Cookie install refused by the browser: {', '.join(sorted(failures))}")
     return installed
 
 
